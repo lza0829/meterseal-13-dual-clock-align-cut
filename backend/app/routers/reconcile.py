@@ -1,20 +1,26 @@
 from __future__ import annotations
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.db import connect
 from app.services import reconcile_service
+from app.services.clock import CLOCK
 
 router = APIRouter(tags=["reconcile"])
 
 
 class AlignIn(BaseModel):
     period_id: str
+    as_of: str | None = None
+    clock: str | None = None
 
 
 class SealIn(BaseModel):
     period_id: str
     batch_id: str | None = None
+    # 可选：须与对齐批次固化的 as_of 完全一致，否则 409
+    as_of: str | None = None
+    clock: str | None = None
 
 
 class FateIn(BaseModel):
@@ -23,7 +29,13 @@ class FateIn(BaseModel):
 
 @router.post("/align")
 def align(body: AlignIn):
-    return reconcile_service.run_align(body.period_id)
+    return reconcile_service.run_align(body.period_id, body.as_of, body.clock)
+
+
+@router.get("/clock")
+def clock_policy():
+    """全局钟口径回显：前端与审计方据此确认只有一套真。"""
+    return {"clock": CLOCK, "audit_only": "occurred_at"}
 
 
 @router.get("/batches")
@@ -40,6 +52,31 @@ def batches(period_id: str | None = None):
                 "SELECT * FROM reconcile_batches ORDER BY created_at DESC"
             ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+@router.get("/snapshots")
+def snapshots(batch_id: str):
+    """回溯某批次落封/预览时的闭包快照（含 occurred_at 审计列）。"""
+    conn = connect()
+    try:
+        batch = conn.execute(
+            "SELECT clock, as_of FROM reconcile_batches WHERE batch_id=?",
+            (batch_id,),
+        ).fetchone()
+        if not batch:
+            raise HTTPException(404, "批次不存在")
+        rows = conn.execute(
+            "SELECT * FROM reconcile_snapshots WHERE batch_id=? ORDER BY meter_id",
+            (batch_id,),
+        ).fetchall()
+        return {
+            "batch_id": batch_id,
+            "clock": batch["clock"],
+            "as_of": batch["as_of"],
+            "rows": [dict(r) for r in rows],
+        }
     finally:
         conn.close()
 
@@ -70,7 +107,9 @@ def set_fate(variance_id: str, body: FateIn):
 
 @router.post("/seal")
 def seal(body: SealIn):
-    return reconcile_service.seal_period(body.period_id, body.batch_id)
+    return reconcile_service.seal_period(
+        body.period_id, body.batch_id, body.as_of, body.clock
+    )
 
 
 @router.get("/periods")

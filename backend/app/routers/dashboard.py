@@ -2,6 +2,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 from app.db import connect
 from app.services.gate import get_setting
+from app.services.clock import CLOCK, AUDIT_CLOCK
 
 router = APIRouter(tags=["dashboard"])
 
@@ -26,6 +27,7 @@ def overview():
             "SELECT COUNT(*) AS c FROM variances WHERE fate='pending'"
         ).fetchone()["c"]
         current = get_setting("current_period", "")
+        # 最近批次带出 clock/as_of，总览与对齐页看到的是同一套钟口径
         batches = [
             dict(r)
             for r in conn.execute(
@@ -33,6 +35,8 @@ def overview():
             ).fetchall()
         ]
         return {
+            "clock": CLOCK,
+            "audit_only_clock": AUDIT_CLOCK,
             "current_period": current,
             "open_periods": open_periods,
             "sealed_periods": sealed_periods,

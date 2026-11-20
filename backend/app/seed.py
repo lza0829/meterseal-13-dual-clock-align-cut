@@ -1,5 +1,6 @@
 from __future__ import annotations
 from app.db import connect
+from app.services.clock import CLOCK
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meters (
@@ -13,7 +14,9 @@ CREATE TABLE IF NOT EXISTS periods (
   period_id TEXT PRIMARY KEY,
   status TEXT NOT NULL DEFAULT 'open',
   sealed_at TEXT,
-  batch_no TEXT
+  batch_no TEXT,
+  sealed_clock TEXT,
+  sealed_as_of TEXT
 );
 CREATE TABLE IF NOT EXISTS estimates (
   estimate_id TEXT PRIMARY KEY,
@@ -42,7 +45,26 @@ CREATE TABLE IF NOT EXISTS reconcile_batches (
   matched_count INTEGER NOT NULL DEFAULT 0,
   variance_count INTEGER NOT NULL DEFAULT 0,
   fingerprint TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- 钟口径固化：本批按哪只钟、哪个 as_of 截止；封印后不可改
+  clock TEXT NOT NULL DEFAULT 'loaded_at',
+  as_of TEXT NOT NULL DEFAULT '',
+  cutoff_at TEXT NOT NULL DEFAULT ''
+);
+-- 批次闭包快照：逐行固化 as_of 时刻纳入的估抄/实抄，封印后仍可回溯同一集合。
+-- snapshot_id 标识整份快照（一批一份），(snapshot_id, meter_id) 为行主键
+CREATE TABLE IF NOT EXISTS reconcile_snapshots (
+  snapshot_id TEXT NOT NULL,
+  batch_id TEXT NOT NULL,
+  meter_id TEXT NOT NULL,
+  estimate_id TEXT,
+  actual_id TEXT,
+  estimate_qty REAL,
+  actual_qty REAL,
+  estimate_loaded_at TEXT,
+  actual_loaded_at TEXT,
+  actual_occurred_at TEXT,
+  PRIMARY KEY (snapshot_id, meter_id)
 );
 CREATE TABLE IF NOT EXISTS variances (
   variance_id TEXT PRIMARY KEY,
@@ -60,11 +82,43 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 """
 
+# 已存在库的增量迁移（初始快照环境无 data/，此分支兜底旧库）
+_COL_MIGRATIONS = {
+    "periods": ["sealed_clock", "sealed_as_of"],
+    "reconcile_batches": ["clock", "as_of", "cutoff_at"],
+}
+_COL_DDL = {
+    ("periods", "sealed_clock"): "ALTER TABLE periods ADD COLUMN sealed_clock TEXT",
+    ("periods", "sealed_as_of"): "ALTER TABLE periods ADD COLUMN sealed_as_of TEXT",
+    ("reconcile_batches", "clock"): "ALTER TABLE reconcile_batches ADD COLUMN clock TEXT NOT NULL DEFAULT 'loaded_at'",
+    ("reconcile_batches", "as_of"): "ALTER TABLE reconcile_batches ADD COLUMN as_of TEXT NOT NULL DEFAULT ''",
+    ("reconcile_batches", "cutoff_at"): "ALTER TABLE reconcile_batches ADD COLUMN cutoff_at TEXT NOT NULL DEFAULT ''",
+}
+
+
+def _existing_columns(conn, table: str) -> set[str]:
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def migrate(conn) -> None:
+    conn.executescript(SCHEMA)
+    for table, cols in _COL_MIGRATIONS.items():
+        present = _existing_columns(conn, table)
+        for col in cols:
+            if col not in present:
+                conn.execute(_COL_DDL[(table, col)])
+    # 旧批次若缺钟口径，统一补装载钟，杜绝无钟批次
+    conn.execute(
+        "UPDATE reconcile_batches SET clock=? WHERE clock IS NULL OR clock=''",
+        (CLOCK,),
+    )
+    conn.commit()
+
 
 def seed_if_empty() -> None:
     conn = connect()
     try:
-        conn.executescript(SCHEMA)
+        migrate(conn)
         n = conn.execute("SELECT COUNT(*) AS c FROM meters").fetchone()["c"]
         if n:
             return

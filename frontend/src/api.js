@@ -23,8 +23,10 @@ export const api = {
   postEstimate: (body) => req('/estimates', { method: 'POST', body: JSON.stringify(body) }),
   postActual: (body) => req('/actuals', { method: 'POST', body: JSON.stringify(body) }),
   periods: () => req('/periods'),
-  align: (period_id) => req('/align', { method: 'POST', body: JSON.stringify({ period_id }) }),
+  clock: () => req('/clock'),
+  align: (period_id, as_of) => req('/align', { method: 'POST', body: JSON.stringify({ period_id, as_of }) }),
   batches: (periodId) => req('/batches' + (periodId ? `?period_id=${periodId}` : '')),
+  snapshots: (batchId) => req(`/snapshots?batch_id=${encodeURIComponent(batchId)}`),
   variances: (q) => {
     const sp = new URLSearchParams(q || {})
     const s = sp.toString()
